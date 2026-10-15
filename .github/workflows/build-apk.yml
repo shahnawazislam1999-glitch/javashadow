@@ -17,7 +17,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - uses: actions/setup-java@v4
         with:
@@ -25,7 +24,7 @@ jobs:
           java-version: 17
 
       - name: Install dependencies
-        run: npm ci
+        run: if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; fi
 
       - name: Build web assets
         run: npm run build --if-present
