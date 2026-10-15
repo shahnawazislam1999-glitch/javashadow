@@ -1,8 +1,9 @@
-name: Build APK
+name: Build Android APK
 
 on:
   push:
     branches: [ main, master ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -12,45 +13,38 @@ jobs:
       VERSION_CODE: ${{ github.run_number }}
       VERSION_NAME: 1.0.${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Install dependencies
-        run: if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; fi
-
-      - name: Build web assets
-        run: npm run build --if-present
-
-      - name: Add Android platform if missing
-        run: '[ -d android ] || npx cap add android'
-
-      - name: Sync Capacitor
-        run: npx cap sync android
-
-      # The runner already ships the Android SDK; no setup-android action needed.
+      # Runner already has the Android SDK; just accept licenses (no setup-android action).
       - name: Accept Android SDK licenses
         run: |
           mkdir -p "$ANDROID_HOME/licenses"
           echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
-          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
           echo -e "\nd56f5187479451eabf01fb78af6dfcb131a6481e" >> "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
 
-      - name: Patch build.gradle
-        run: node scripts/patch-android.js
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
-        working-directory: android
-        run: chmod +x gradlew && ./gradlew assembleDebug --stacktrace
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug + release APK
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: SHADOWit-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHADOWit-release-apk
+          path: app/build/outputs/apk/release/*.apk
