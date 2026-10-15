@@ -4080,12 +4080,24 @@ function updateSentenceCardFullscreenButton() {
     sentenceCardFullscreenBtn.setAttribute('aria-pressed', String(active));
 }
 
+const hasNativeImmersive = !!(window.AndroidBridge && AndroidBridge.setImmersive);
+let nativeImmersive = true;
+if (hasNativeImmersive) {
+    try { nativeImmersive = AndroidBridge.isImmersive(); } catch (e) {}
+    fullscreenToggleBtn.innerText = nativeImmersive ? 'Exit Full Screen' : 'Enter Full Screen';
+}
 fullscreenToggleBtn.addEventListener('click', () => {
+    if (hasNativeImmersive) {
+        nativeImmersive = !nativeImmersive;
+        AndroidBridge.setImmersive(nativeImmersive);
+        fullscreenToggleBtn.innerText = nativeImmersive ? 'Exit Full Screen' : 'Enter Full Screen';
+        return;
+    }
     if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{});
     else document.exitFullscreen();
 });
 document.addEventListener('fullscreenchange', () => {
-    fullscreenToggleBtn.innerText = document.fullscreenElement ? 'Exit Full Screen' : 'Enter Full Screen';
+    if (!hasNativeImmersive) fullscreenToggleBtn.innerText = document.fullscreenElement ? 'Exit Full Screen' : 'Enter Full Screen';
     updateSentenceCardFullscreenButton();
 });
 
@@ -4137,13 +4149,41 @@ videoUpload.addEventListener('change', (e) => {
     });
 });
 
+// --- Subtitle file reader: detects UTF-8 / UTF-16 / Windows-1252 so any .srt loads on the first try ---
+function decodeSrtBuffer(buf) {
+    const u8 = new Uint8Array(buf);
+    let enc = 'utf-8';
+    if (u8.length > 1 && u8[0] === 0xFF && u8[1] === 0xFE) enc = 'utf-16le';
+    else if (u8.length > 1 && u8[0] === 0xFE && u8[1] === 0xFF) enc = 'utf-16be';
+    else if (u8.length > 3 && u8[1] === 0 && u8[3] === 0) enc = 'utf-16le';
+    let text = new TextDecoder(enc).decode(u8);
+    if (enc === 'utf-8' && text.indexOf('\uFFFD') !== -1) {
+        try { text = new TextDecoder('windows-1252').decode(u8); } catch (e) {}
+    }
+    return text.replace(/^\uFEFF/, '');
+}
+function readSrtFile(file, inputEl, onText) {
+    const fr = new FileReader();
+    fr.onload = () => { let t = ''; try { t = decodeSrtBuffer(fr.result); } catch (e) { t = ''; } onText(t); };
+    fr.onerror = () => { alert('Could not read the subtitle file. Please pick it again.'); };
+    fr.onloadend = () => { try { inputEl.value = ''; } catch (e) {} };
+    fr.readAsArrayBuffer(file);
+}
+
+videoPlayer.addEventListener('error', () => {
+    const err = videoPlayer.error;
+    if (!videoPlayer.getAttribute('src')) return;
+    const why = err && err.code === 4 ? 'This video format/codec is not supported on this device. Use an MP4 (H.264 video + AAC audio) file.' : 'The video could not be played' + (err && err.message ? ' (' + err.message + ')' : '') + '.';
+    currentSentenceDiv.innerHTML = '<span style="color:var(--danger)">' + why + '</span>';
+    if (isPlaying) { isPlaying = false; updateFloatingBtn(); }
+});
+
 loadSrtBtn.addEventListener('click', () => srtUpload.click());
 srtUpload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-        const text = evt.target.result;
+    const inputEl = e.target;
+    readSrtFile(file, inputEl, (text) => {
         saveToDB('srt', text, (ok) => { if (!ok) alert('SRT could not be saved permanently in this browser.'); });
         activeSrtView = 'primary';
         localStorage.setItem('app_srt_view', 'primary');
@@ -4163,18 +4203,15 @@ srtUpload.addEventListener('change', (e) => {
         } else {
             currentSentenceDiv.innerText = "Failed to parse SRT file.";
         }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+    });
 });
 
 loadSecondSrtBtn.addEventListener('click', () => secondSrtUpload.click());
 secondSrtUpload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-        const text = evt.target.result;
+    const inputEl = e.target;
+    readSrtFile(file, inputEl, (text) => {
         const parsed = parseSRTSubtitles(text);
         if (!parsed.length) { alert('Failed to parse second SRT file.'); return; }
         secondSrtSubtitles = parsed;
@@ -4188,9 +4225,7 @@ secondSrtUpload.addEventListener('change', (e) => {
         renderPlaylist();
         updateVisibilityStates();
         updateScreenOnly();
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+    });
 });
 
 toggleSrtViewBtn.addEventListener('click', () => {
@@ -7164,10 +7199,15 @@ function speakNext() {
         const startSub = videoSubtitles[groupStart];
         const endSub = videoSubtitles[groupEnd] || startSub;
         videoPlayer.pause();
-        videoPlayer.currentTime = getVideoTimeForSubtitleTime(startSub.start);
+        const targetTime = getVideoTimeForSubtitleTime(startSub.start);
         videoPlayer.playbackRate = parseFloat(speedInput.value) || 1.0;
 
-        videoPlayer.onseeked = function() {
+        // Start playback once the seek has finished. A seek to the time the video is
+        // already at never fires "seeked", so also start directly / via a fallback timer.
+        let playStarted = false;
+        const beginVideoPlay = function() {
+            if (playStarted) return;
+            playStarted = true;
             videoPlayer.onseeked = null;
             if (!isPlaying) return;
             updateVideoCurrentSubtitleIndicator();
@@ -7186,10 +7226,17 @@ function speakNext() {
                     }, 50);
                 }).catch(e => {
                     isPlaying = false; updateFloatingBtn();
-                    currentSentenceDiv.innerHTML += `<br><span style="color:var(--danger)">Playback blocked by browser.</span>`;
+                    currentSentenceDiv.innerHTML += `<br><span style="color:var(--danger)">Playback blocked: ${e && e.message ? e.message : 'could not play this video'}</span>`;
                 });
             }
         };
+        videoPlayer.onseeked = beginVideoPlay;
+        if (Math.abs(videoPlayer.currentTime - targetTime) < 0.05) {
+            setTimeout(beginVideoPlay, 0);
+        } else {
+            videoPlayer.currentTime = targetTime;
+            setTimeout(beginVideoPlay, 1500); // safety net if "seeked" never arrives
+        }
     } else {
         let groupPos = 0;
         const speakGroupLine = () => {
@@ -8136,6 +8183,7 @@ if ('serviceWorker' in navigator) {
   }
   // cartoon-style ✦ twinkle: soft glow + long thin 4-point rays
   function twinkle(x,y,r,rot,alpha,color){
+    if(!(r>0.1)) r=0.1;
     var g=ctx.createRadialGradient(x,y,0,x,y,r*1.6);
     g.addColorStop(0,'rgba(255,255,255,'+(.55*alpha)+')'); g.addColorStop(1,'rgba(255,230,170,0)');
     ctx.globalAlpha=1; ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,r*1.6,0,6.283); ctx.fill();

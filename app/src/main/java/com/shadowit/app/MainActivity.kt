@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.view.View
@@ -32,6 +33,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -56,21 +58,27 @@ class MainActivity : AppCompatActivity() {
     private var pendingPermissionRequest: PermissionRequest? = null
     private var pendingSave: ByteArray? = null
 
+    // App runs full screen (status bar + navigation bar hidden) by default.
+    private var immersive = true
+
     // ---- Activity result launchers (must be registered before STARTED) ----
 
     private val filePicker =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
-            val uris: Array<Uri>? = if (result.resultCode == RESULT_OK && data != null) {
+            var uris: Array<Uri>? =
+                WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+            if (uris == null && result.resultCode == RESULT_OK && data != null) {
                 val clip = data.clipData
-                when {
-                    clip != null -> Array(clip.itemCount) { clip.getItemAt(it).uri }
+                uris = when {
+                    clip != null && clip.itemCount > 0 -> Array(clip.itemCount) { clip.getItemAt(it).uri }
                     data.data != null -> arrayOf(data.data!!)
                     else -> null
                 }
-            } else null
-            fileCallback?.onReceiveValue(uris)
+            }
+            val cb = fileCallback
             fileCallback = null
+            cb?.onReceiveValue(uris)
         }
 
     private val micPermission =
@@ -113,6 +121,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun setImmersive(on: Boolean) {
+            runOnUiThread { immersive = on; applyImmersive() }
+        }
+
+        @JavascriptInterface
+        fun isImmersive(): Boolean = immersive
+
+        @JavascriptInterface
         fun keepScreenOn(on: Boolean) {
             runOnUiThread {
                 if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -124,6 +140,15 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Draw edge-to-edge, under the status bar / camera cut-out.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
 
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain(HOST)
@@ -140,6 +165,15 @@ class MainActivity : AppCompatActivity() {
             )
         )
         setContentView(root)
+
+        // Edge-to-edge disables adjustResize, so lift the page above the keyboard ourselves.
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val bars = if (immersive) 0 else insets.getInsets(WindowInsetsCompat.Type.systemBars()).top
+            v.setPadding(0, bars, 0, ime.bottom)
+            insets
+        }
+        applyImmersive()
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -178,6 +212,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersive()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
@@ -211,7 +250,7 @@ class MainActivity : AppCompatActivity() {
             )
         )
         webView.visibility = View.GONE
-        setSystemBarsHidden(true)
+        applyImmersive()
     }
 
     private fun hideCustomView() {
@@ -219,21 +258,21 @@ class MainActivity : AppCompatActivity() {
         root.removeView(view)
         customView = null
         webView.visibility = View.VISIBLE
-        setSystemBarsHidden(false)
+        applyImmersive()
         customViewCallback?.onCustomViewHidden()
         customViewCallback = null
     }
 
-    private fun setSystemBarsHidden(hidden: Boolean) {
+    private fun applyImmersive() {
         val controller = WindowInsetsControllerCompat(window, window.decorView)
-        WindowCompat.setDecorFitsSystemWindows(window, !hidden)
-        if (hidden) {
+        if (immersive || customView != null) {
             controller.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
         }
+        ViewCompat.requestApplyInsets(root)
     }
 
     // ---- WebViewClient ----
@@ -278,8 +317,9 @@ class MainActivity : AppCompatActivity() {
             filePathCallback: ValueCallback<Array<Uri>>,
             fileChooserParams: FileChooserParams
         ): Boolean {
-            fileCallback?.onReceiveValue(null)
+            val previous = fileCallback
             fileCallback = filePathCallback
+            previous?.onReceiveValue(null)
             val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 // "*/*" on purpose: .mkv / .srt / .json have unreliable MIME types on Android.
@@ -290,11 +330,12 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             return try {
-                filePicker.launch(Intent.createChooser(intent, null))
+                filePicker.launch(intent)
                 true
             } catch (e: Exception) {
-                fileCallback?.onReceiveValue(null)
+                val cb = fileCallback
                 fileCallback = null
+                cb?.onReceiveValue(null)
                 false
             }
         }
