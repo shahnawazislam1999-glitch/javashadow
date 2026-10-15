@@ -76,6 +76,19 @@ class MainActivity : AppCompatActivity() {
                     else -> null
                 }
             }
+            // Keep read access to SAF/content URIs for the lifetime of the app and,
+            // where the provider allows it, across restarts. This is important on
+            // Android 10+ because WebView receives content:// URIs rather than paths.
+            uris?.forEach { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {
+                    // Some providers do not grant persistable permissions. The
+                    // temporary URI grant is still valid for the current operation.
+                }
+            }
             val cb = fileCallback
             fileCallback = null
             cb?.onReceiveValue(uris)
@@ -187,7 +200,12 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(false)
             builtInZoomControls = false
             displayZoomControls = false
+            // Android WebView can otherwise reject media streams created from
+            // local Blob/object URLs after the app is resumed.
+            mediaPlaybackRequiresUserGesture = false
+            javaScriptCanOpenWindowsAutomatically = false
         }
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         webView.addJavascriptInterface(Bridge(), "AndroidBridge")
         webView.webViewClient = AppWebViewClient()
         webView.webChromeClient = AppChromeClient()
@@ -320,14 +338,16 @@ class MainActivity : AppCompatActivity() {
             val previous = fileCallback
             fileCallback = filePathCallback
             previous?.onReceiveValue(null)
-            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            // ACTION_OPEN_DOCUMENT is more reliable than ACTION_GET_CONTENT on Android
+            // for WebView <input type="file">, especially for .srt/.mkv files whose
+            // MIME type is not registered consistently by file-manager apps.
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                // "*/*" on purpose: .mkv / .srt / .json have unreliable MIME types on Android.
                 type = "*/*"
-                putExtra(
-                    Intent.EXTRA_ALLOW_MULTIPLE,
-                    fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE
-                )
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE,
+                    fileChooserParams.mode == FileChooserParams.MODE_OPEN_MULTIPLE)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             }
             return try {
                 filePicker.launch(intent)

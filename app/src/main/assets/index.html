@@ -1418,7 +1418,7 @@ body.dark-theme #pauseTimer {
 #floatingTtsBtn:active { transform: scale(0.95); }
 
 /* --- Modals --- */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 1rem; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 1rem; touch-action: auto; pointer-events: auto; }
 .modal-overlay.active { display: flex; }
 .modal-content { background: var(--card-bg); border-radius: var(--radius-lg); width: 100%; max-width: 600px; padding: 1.5rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); border: 1px solid var(--border-color); position: relative; max-height: 90vh; overflow-y: auto; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; }
@@ -4127,7 +4127,7 @@ document.getElementById('resumeVideoBtn').addEventListener('click', () => {
     }
 });
 
-loadVideoBtn.addEventListener('click', () => videoUpload.click());
+loadVideoBtn.addEventListener('click', () => { try { videoUpload.value = ''; } catch(e) {} videoUpload.click(); });
 videoUpload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -4165,13 +4165,30 @@ function decodeSrtBuffer(buf) {
     return text.replace(/^\uFEFF/, '');
 }
 function readSrtFile(file, inputEl, onText) {
+    if (!file) { onText(''); return; }
     const fr = new FileReader();
-    fr.onload = () => { let t = ''; try { t = decodeSrtBuffer(fr.result); } catch (e) { t = ''; } onText(t); };
-    fr.onerror = () => { alert('Could not read the subtitle file. Please pick it again.'); };
+    fr.onload = () => {
+        let t = '';
+        try { t = decodeSrtBuffer(fr.result); } catch (e) { console.error('SRT decode failed', e); }
+        onText(t);
+    };
+    fr.onerror = () => {
+        console.error('SRT FileReader error', fr.error);
+        alert('Could not read this SRT file on Android. Please choose the file again.');
+        onText('');
+    };
+    fr.onabort = () => onText('');
     fr.onloadend = () => { try { inputEl.value = ''; } catch (e) {} };
-    fr.readAsArrayBuffer(file);
+    try { fr.readAsArrayBuffer(file); } catch (e) {
+        console.error('SRT read failed', e);
+        alert('Android could not open this subtitle file. Try copying the SRT to Downloads and select it again.');
+        onText('');
+    }
 }
 
+videoPlayer.addEventListener('loadedmetadata', () => {
+    try { videoPlayer.currentTime = Math.max(0, Math.min(videoPlayer.currentTime || 0, videoPlayer.duration || 0)); } catch (e) {}
+});
 videoPlayer.addEventListener('error', () => {
     const err = videoPlayer.error;
     if (!videoPlayer.getAttribute('src')) return;
@@ -4180,7 +4197,7 @@ videoPlayer.addEventListener('error', () => {
     if (isPlaying) { isPlaying = false; updateFloatingBtn(); }
 });
 
-loadSrtBtn.addEventListener('click', () => srtUpload.click());
+loadSrtBtn.addEventListener('click', () => { try { srtUpload.value = ''; } catch(e) {} srtUpload.click(); });
 srtUpload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -4211,7 +4228,7 @@ srtUpload.addEventListener('change', (e) => {
     });
 });
 
-loadSecondSrtBtn.addEventListener('click', () => secondSrtUpload.click());
+loadSecondSrtBtn.addEventListener('click', () => { try { secondSrtUpload.value = ''; } catch(e) {} secondSrtUpload.click(); });
 secondSrtUpload.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -5881,11 +5898,34 @@ themeToggleBtn.addEventListener('click', () => {
     const isDark = !document.body.classList.contains('dark-theme');
     applyTheme(isDark); localStorage.setItem('app_theme', isDark ? 'dark' : 'light');
 });
-openSettingsBtn.addEventListener('click', () => settingsModal.classList.add('active'));
-closeSettingsBtn.addEventListener('click', () => settingsModal.classList.remove('active'));
+function openMainSettings() {
+    if (!settingsModal) return;
+    settingsModal.classList.add('active');
+    settingsModal.style.display = 'flex';
+    settingsModal.setAttribute('aria-hidden', 'false');
+}
+function closeMainSettings() {
+    if (!settingsModal) return;
+    settingsModal.classList.remove('active');
+    settingsModal.style.display = '';
+    settingsModal.setAttribute('aria-hidden', 'true');
+}
+if (openSettingsBtn) openSettingsBtn.addEventListener('click', openMainSettings);
+if (closeSettingsBtn) closeSettingsBtn.addEventListener('click', closeMainSettings);
+// Android WebView/file-manager overlays can occasionally swallow a normal click
+// listener. Capture the event at document level so every Settings gear remains
+// reachable by tap.
+document.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest
+        ? event.target.closest('#openSettingsBtn, [data-open-settings]') : null;
+    if (btn) { event.preventDefault(); openMainSettings(); }
+    if (event.target === settingsModal) closeMainSettings();
+}, true);
 // Extra always-visible Settings buttons (the original gear lives in the Active Sentence
 // Toolbar, which is hidden whenever no subtitles are loaded).
-document.querySelectorAll('[data-open-settings]').forEach(btn => btn.addEventListener('click', () => settingsModal.classList.add('active')));
+document.querySelectorAll('[data-open-settings]').forEach(btn => {
+    btn.addEventListener('pointerup', openMainSettings, { passive: false });
+});
 
 // =====================================================================
 // --- Full Backup / Restore (merge) system ---
