@@ -2895,6 +2895,7 @@ html.pen-annotate-on #penAnnotateCanvas{display:block;}
                <button class="fs-btn" id="toggleVideoVisibilityBtn" title="Show/Hide Video" style="display: flex; background-color: rgb(14, 165, 233);">👁️🎥</button>
                <button class="fs-btn" id="resumeVideoBtn" title="Resume Saved Video" style="display: flex; background-color: rgb(245, 158, 11);">▶️🎥</button>
                <button class="fs-btn" id="loadVideoBtn" title="Load Local Video" style="background-color: #8b5cf6;">🎬+</button>
+               <button class="fs-btn" id="fsSettingsBtn" type="button" data-open-settings title="Settings" aria-label="Open settings" style="background-color: #475569;">⚙️</button>
                <a class="fs-btn donate-btn" href="https://example.com/donate" target="_blank" rel="noopener noreferrer" title="Donate" aria-label="Donate">💝<span>Donate</span></a>
                <a class="fs-btn about-app-btn" href="https://example.com/about-app" target="_blank" rel="noopener noreferrer" title="About App" aria-label="About App">ℹ️<span>About App</span></a>
                <input type="file" id="videoUpload" accept="video/mp4,video/x-matroska,.mkv" style="display:none;">
@@ -3003,6 +3004,7 @@ html.pen-annotate-on #penAnnotateCanvas{display:block;}
          <div id="sentenceIndexControls" class="sentence-toolbars-wrapper is-pinned" style="--pinned-toolbars-top: 163px;">
             <!-- 1. Playlist Toolbar -->
             <div class="playlist-toolbar-shell is-toolbar-pinned" id="playlistToolbarShell" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+               <button id="plSettingsBtn" type="button" data-open-settings class="global-translate-btn" title="Settings" aria-label="Open settings">⚙️</button>
                <button id="loadSrtBtn" class="global-translate-btn" title="Upload SRT for Video Sync" style="background-color: var(--input-bg); font-size: 0.9rem; padding: 0.3rem 0.6rem; border-color: #8b5cf6; color: #8b5cf6; font-weight: bold;">📝 SRT</button>
                <button id="quickLoadSrtBtn" class="global-translate-btn" title="Quick Load Saved SRT to Index" style="background-color: var(--input-bg); font-size: 0.9rem; padding: 0.3rem 0.6rem; border-color: #0ea5e9; color: #0ea5e9; font-weight: bold;">⚡ SRT Load</button>
                <button id="loadSecondSrtBtn" class="global-translate-btn second-srt-toolbar-btn has-second-srt" title="Upload second SRT" style="background-color: var(--input-bg); font-size: 0.9rem; padding: 0.3rem 0.6rem; border-color: #f43f5e; color: #f43f5e; font-weight: bold;">2️⃣ SRT</button>
@@ -4184,7 +4186,9 @@ srtUpload.addEventListener('change', (e) => {
     if (!file) return;
     const inputEl = e.target;
     readSrtFile(file, inputEl, (text) => {
-        saveToDB('srt', text, (ok) => { if (!ok) alert('SRT could not be saved permanently in this browser.'); });
+        if (parseSRTSubtitles(text).length) {
+            saveToDB('srt', text, (ok) => { if (!ok) alert('SRT could not be saved permanently in this browser.'); });
+        }
         activeSrtView = 'primary';
         localStorage.setItem('app_srt_view', 'primary');
         isVideoMode = true;
@@ -4201,7 +4205,8 @@ srtUpload.addEventListener('change', (e) => {
             }
             updateScreenOnly();
         } else {
-            currentSentenceDiv.innerText = "Failed to parse SRT file.";
+            const peek = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 70);
+            currentSentenceDiv.innerText = "Failed to parse SRT file. " + (text ? "Read " + text.length + " characters, starts with: \"" + peek + "\"" : "The file looked empty.");
         }
     });
 });
@@ -4298,23 +4303,64 @@ function quickLoadSavedSrt() {
 }
 quickLoadSrtBtn.addEventListener('click', quickLoadSavedSrt);
 
+// --- Tolerant SRT / VTT parser -------------------------------------------------
+// Accepts: "-->", "->", "--->", unicode dashes (– —), "→", HTML-escaped "--&gt;",
+// 1-or-2-digit hours, missing hours (mm:ss,xxx), 1-3 digit milliseconds,
+// "," "." or ":" before the milliseconds, missing blank lines between cues,
+// blank lines that contain spaces, BOM / zero-width characters, cue settings.
+const SRT_TIME_PART = '(?:(\\d{1,3}):)?(\\d{1,2}):(\\d{1,2})(?:[,.:](\\d{1,9}))?';
+const SRT_ARROW = '\\s*(?:-+\\s*>+|=+\\s*>+|\u2192|\u2794|\u279C|\u27F6)\\s*';
+const SRT_LINE_RE = new RegExp('^\\s*' + SRT_TIME_PART + SRT_ARROW + SRT_TIME_PART + '(.*)$');
+
+function normalizeSrtText(data) {
+    let s = String(data == null ? '' : data);
+    s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '');
+    s = s.replace(/&amp;/gi, '&').replace(/&gt;|&#0*62;|&#x0*3e;/gi, '>').replace(/&lt;|&#0*60;|&#x0*3c;/gi, '<');
+    s = s.replace(/[\u2010-\u2015\u2212]/g, '-');
+    s = s.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ');
+    s = s.replace(/\r\n/g, '\n').replace(/[\r\u0085\u2028\u2029]/g, '\n');
+    return s;
+}
+
+function srtPartsToSeconds(h, m, s, f) {
+    const ms = f ? parseInt((f + '00').slice(0, 3), 10) : 0;
+    return parseInt(h || '0', 10) * 3600 + parseInt(m, 10) * 60 + parseInt(s, 10) + ms / 1000;
+}
+
 function parseSRTSubtitles(data) {
-    const normalizedData = String(data || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const blocks = normalizedData.split(/\n{2,}/);
+    const lines = normalizeSrtText(data).split('\n');
     const subtitles = [];
-    blocks.forEach(block => {
-        const lines = block.trim().split('\n');
-        if (lines.length < 2) return;
-        const timeIndex = lines.findIndex(line => /\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(line));
-        if (timeIndex === -1) return;
-        const timeMatch = lines[timeIndex].match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
-        if (!timeMatch) return;
-        const start = timeToSeconds(timeMatch[1]);
-        const end = timeToSeconds(timeMatch[2]);
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return;
-        const text = lines.slice(timeIndex + 1).join(' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
-        if (text) subtitles.push({ start, end, text });
-    });
+    let cur = null;
+    const flush = () => {
+        if (!cur) return;
+        const text = cur.lines.join(' ').replace(/<[^>]+>/g, '').replace(/\{[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
+        if (text) subtitles.push({ start: cur.start, end: cur.end, text });
+        cur = null;
+    };
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const m = line.match(SRT_LINE_RE);
+        if (m) {
+            if (cur) {
+                // the cue number of THIS cue was collected as text of the previous one
+                if (cur.lines.length && /^\s*\d+\s*$/.test(cur.lines[cur.lines.length - 1])) cur.lines.pop();
+                flush();
+            }
+            const start = srtPartsToSeconds(m[1], m[2], m[3], m[4]);
+            let end = srtPartsToSeconds(m[5], m[6], m[7], m[8]);
+            if (!Number.isFinite(start) || !Number.isFinite(end)) { cur = null; continue; }
+            if (end < start) end = start;
+            cur = { start, end, lines: [] };
+            const rest = (m[9] || '').trim();
+            // ignore WebVTT cue settings such as "align:start position:0%"
+            if (rest && !/^(?:[A-Za-z]+:\S+\s*)+$/.test(rest)) cur.lines.push(rest);
+            continue;
+        }
+        if (!cur) continue;
+        if (!line.trim()) { flush(); continue; }
+        cur.lines.push(line.trim());
+    }
+    flush();
     return subtitles;
 }
 
@@ -4324,9 +4370,8 @@ function parseSRTData(data) {
 }
 
 function timeToSeconds(t) {
-    let p = t.split(':');
-    let s = p[2].split(/[,.]/); 
-    return parseInt(p[0], 10)*3600 + parseInt(p[1], 10)*60 + parseInt(s[0], 10) + parseInt(s[1], 10)/1000;
+    const m = String(t).match(new RegExp('^\\s*' + SRT_TIME_PART + '\\s*$'));
+    return m ? srtPartsToSeconds(m[1], m[2], m[3], m[4]) : NaN;
 }
 
 function secondsToSrtTime(totalSeconds) {
@@ -4502,7 +4547,7 @@ function cleanSrtText() {
     let cleanedLines = [];
     for (let i = 0; i < lines.length; i++) {
         let line = lines[i].trim();
-        if (!line || /^\d+$/.test(line) || /\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(line)) continue;
+        if (!line || /^\d+$/.test(line) || SRT_LINE_RE.test(normalizeSrtText(line))) continue;
         line = line.replace(/<[^>]+>/g, '').replace(/\([^)]+\)/g, '').replace(/\[[^\]]+\]/g, '').replace(/^-\s*/, '').trim();
         if (line) cleanedLines.push(line);
     }
@@ -5838,6 +5883,9 @@ themeToggleBtn.addEventListener('click', () => {
 });
 openSettingsBtn.addEventListener('click', () => settingsModal.classList.add('active'));
 closeSettingsBtn.addEventListener('click', () => settingsModal.classList.remove('active'));
+// Extra always-visible Settings buttons (the original gear lives in the Active Sentence
+// Toolbar, which is hidden whenever no subtitles are loaded).
+document.querySelectorAll('[data-open-settings]').forEach(btn => btn.addEventListener('click', () => settingsModal.classList.add('active')));
 
 // =====================================================================
 // --- Full Backup / Restore (merge) system ---
